@@ -1,96 +1,97 @@
 # ManjuFlow Studio
 
-一个人导演的 AI 漫剧生产与带教编排后端。导演在同一个系统里维护提示词资产、编排分镜、调度渲染、审片发布，
-并把已发布的分镜开成教学工坊带学员练习。
+一名导演独立完成 AI 漫剧生产与带教的后端服务。系统把**提示词资产**、**分镜生产编排**与
+**教学工坊**串成两条互相依赖的业务链：
 
-## 业务模型
+- **制作链**：建剧集 → 编排分镜 → 绑定提示词版本 → 提交渲染（幂等键 + 日配额）→ worker 渲染（租约 / 退避重试 / 永久失败）→ 审片 → 发布。
+- **带教链**：已发布剧集的已审片分镜开教学工坊 → 学员报名（座位容量）→ 按工坊冻结的提示词版本提交练习 → 导演评审 → 结业。
 
-两条相互依赖的公开业务路径：
+两条链相互约束：工坊只能建立在 `published` 剧集的 `approved` 分镜上；提示词版本被未完成渲染任务或
+未结业工坊引用时不可下架；工坊未结业时对应分镜不能退回改稿。
 
-**制作链**：建剧集 → 编排分镜 → 绑定提示词版本 → 提交渲染（日配额 + 幂等键）→ worker 渲染（租约、退避重试、永久失败）
-→ 分镜审片 → 剧集发布。
+## 技术栈
 
-**带教链**：已发布剧集的已审片分镜开教学工坊 → 学员报名（座位容量）→ 学员按工坊冻结的提示词版本提交练习
-→ 导演评审 → 停止报名进入评分 → 全部评审完成后结课。
-
-两条链相互约束：
-
-- 工坊只能建立在 `published` 剧集的 `approved` 分镜上，并冻结该分镜当时绑定的提示词版本。
-- 提示词版本被绑定中的分镜、未完成的渲染任务或未结课的工坊引用时不能下架。
-- 分镜在有存活工坊时不能退回改稿，避免学员中途失去参考材料。
-- 剧集只有全部分镜审片通过且仍绑定提示词版本时才能发布。
-
-## 角色
-
-| 角色 | 能力 |
+| 项 | 选择 |
 | --- | --- |
-| `director` | 提示词资产、剧集与分镜编排、绑定版本、提交渲染、审片、发布、开工坊、评审练习 |
-| `apprentice` | 浏览目录、报名工坊、提交练习 |
-
-身份是服务端会话：登录返回一次性不透明 Bearer token，数据库只保存其 SHA-256 摘要；退出即撤销，过期即失效，
-撤销与重签都会推进会话 `generation`。
+| 语言 | Go 1.22（`GOTOOLCHAIN=local`） |
+| 数据库 | SQLite，驱动 `modernc.org/sqlite`（纯 Go，`CGO_ENABLED=0`） |
+| HTTP | 标准库 `net/http` + Go 1.22 路由方法模式 |
+| 迁移 | `migrations/*.sql` 通过 `embed.FS` 顺序执行，`schema_migrations` 台账 |
+| 时区 | 业务时区 `Asia/Shanghai`（镜像内置 `time/tzdata`） |
 
 ## 目录结构
 
 ```text
-cmd/server              进程入口、信号处理、优雅关闭
-internal/app            配置到 HTTP 与 worker 的装配、首启播种
-internal/httpapi        路由、处理器、视图投影、统一错误信封
-internal/middleware     请求 ID、访问日志、panic 恢复、超时、鉴权
-internal/service/*      authsvc / promptsvc / productionsvc / rendersvc / teachingsvc
-internal/domain/*       identity / prompt / production / render / teaching / audit
-internal/repository     仓储契约、分页与过滤类型
-internal/repository/sqliterepo  SQLite 实现（全部 SQL 只在这里）
-internal/storage/sqlitedb       连接、pragma、事务边界、迁移执行
-internal/idempotency    幂等键生命周期
-internal/auditlog       事务内审计记录器
-internal/worker         渲染 worker 与周期巡检
-internal/apptest        端到端测试用的确定性夹具
-migrations              版本化 SQL 迁移（embed.FS）
+cmd/server                  进程入口、信号处理、优雅关闭
+internal/app                配置 → 存储 → 服务 → HTTP → worker 的装配与 bootstrap
+internal/config             环境变量加载与校验
+internal/apperr             稳定错误码、错误链、HTTP 状态映射
+internal/clock              业务时区时钟与可控测试时钟
+internal/logging            结构化 JSON 日志
+internal/reqctx             请求 ID 与调用者身份的 context 传播
+internal/security           PBKDF2 口令、不透明会话 token、请求指纹
+internal/domain/identity    角色、capability、会话可用性
+internal/domain/prompt      提示词模板与不可变版本、下架规则
+internal/domain/production  剧集与分镜状态机、发布前置条件
+internal/domain/render      渲染任务状态机、租约 fencing、退避
+internal/domain/teaching    工坊、报名、练习评审
+internal/domain/audit       审计事件值对象
+internal/repository         持久化接口、分页与过滤类型
+internal/repository/sqliterepo  全部 SQL 实现
+internal/storage/sqlitedb   连接、pragma、事务 runner、迁移执行器
+internal/idempotency        幂等键生命周期
+internal/auditlog           事务内审计写入
+internal/service/*          authsvc / promptsvc / productionsvc / rendersvc / teachingsvc
+internal/httpapi            路由、处理器、响应视图、统一错误信封
+internal/middleware         请求 ID、访问日志、panic recovery、超时、鉴权
+internal/worker             渲染 worker 与后台巡检
+internal/apptest            端到端测试的确定性支撑代码
+migrations                  版本化 SQL 与嵌入加载器
 ```
 
-依赖方向：领域层不依赖 HTTP 与数据库；HTTP 不拼 SQL；worker 通过 service 访问业务状态。
+## 数据模型
 
-## 数据与并发
+16 张表：`schema_migrations`、`studios`、`users`、`sessions`、`prompt_templates`、`prompt_versions`、
+`series`、`shots`、`render_quotas`、`render_jobs`、`workshops`、`enrollments`、`practice_submissions`、
+`audit_events`、`idempotency_records`、`business_sequences`。
 
-- SQLite，驱动 `modernc.org/sqlite`（纯 Go，`CGO_ENABLED=0`）。
-- 写事务使用 `BEGIN IMMEDIATE`，开启 `foreign_keys` 与 WAL。
-- 16 张关联表：`schema_migrations`、`studios`、`users`、`sessions`、`prompt_templates`、`prompt_versions`、
-  `series`、`shots`、`render_quotas`、`render_jobs`、`workshops`、`enrollments`、`practice_submissions`、
-  `audit_events`、`idempotency_records`、`business_sequences`。
-- 并发控制：日配额与工坊座位的条件 `UPDATE`、`series/shots/workshops/practice_submissions` 版本号乐观锁、
-  渲染任务的活动唯一索引与 `lease_generation` fencing、业务序列 `ON CONFLICT ... RETURNING` 单语句自增、
-  幂等记录四元组唯一约束。
-- 迁移：顺序执行并与台账同事务写入；重复启动幂等；已应用脚本被改动或出现未知版本时拒绝启动。
+关键约束：
 
-## 运行
+- 唯一：`users(studio_id,email)`、`sessions(token_hash)`、`prompt_templates(studio_id,slug)`、
+  `prompt_versions(template_id,version)`、`series(studio_id,code)`、`shots(series_id,ordinal)`、
+  `render_quotas(studio_id,quota_day)`、`enrollments(workshop_id,apprentice_id)`、
+  `idempotency_records(studio_id,method,path,key)`；
+- 部分唯一索引 `idx_render_jobs_active_shot`：同一分镜最多一个在途渲染任务；
+- 并发控制：配额与座位使用条件 `UPDATE`，`series`/`shots`/`workshops`/`practice_submissions` 使用版本号乐观锁，
+  渲染任务使用 `lease_generation` fencing，业务编号使用 `INSERT ... ON CONFLICT ... RETURNING` 单语句自增。
 
-```bash
-cp .env.example .env
-go run ./cmd/server
-```
+## 状态机
 
-首启会创建工坊与两个角色账号。未设置 `MANJU_DIRECTOR_PASSWORD` / `MANJU_APPRENTICE_PASSWORD` 时，
-进程会随机生成一次性口令并只记录一次日志；仓库与镜像中不含任何凭据。
+- `series`：`draft → shooting → reviewing → published → archived`（`cancelled` 终止分支）
+- `shots`：`draft → bound → rendering → rendered → approved`，`rendered|approved → rework → bound`
+- `render_jobs`：`queued → leased → succeeded | retrying → queued | failed_permanent`（`cancelled` 终止分支）
+- `workshops`：`open → teaching → grading → closed`（`open → grading` 用于无人提交时直接结课，`cancelled` 终止分支）
+- `enrollments`：`enrolled → submitted → graded`
+- `practice_submissions`：`pending → accepted | returned`（及格线 60）
 
 ## HTTP 接口
 
 | 方法与路径 | 说明 |
 | --- | --- |
 | `GET /healthz` | 存活检查 |
-| `GET /readyz` | 就绪检查，返回已应用的 schema 版本 |
-| `POST /v1/auth/login` | 登录，返回一次性 token |
+| `GET /readyz` | 就绪检查，校验数据库连通与 schema 版本 |
+| `POST /v1/auth/login` | 登录，返回一次性 Bearer token |
 | `POST /v1/auth/logout` | 退出并撤销当前会话 |
-| `GET /v1/auth/session` | 当前会话与能力清单 |
-| `POST /v1/members` | 导演添加成员 |
+| `GET /v1/auth/session` | 当前会话与 capability |
+| `POST /v1/members` | 导演新增成员 |
 | `POST /v1/prompt-templates` | 新建提示词模板 |
 | `POST /v1/prompt-templates/{templateID}/versions` | 追加不可变版本 |
 | `GET /v1/prompt-templates/{templateID}/versions` | 分页查看版本链 |
 | `POST /v1/prompt-versions/{versionID}/activate` | 冻结草稿版本 |
-| `POST /v1/prompt-versions/{versionID}/retire` | 下架版本（受引用约束） |
-| `GET /v1/prompt-versions/{versionID}/references` | 查看存活引用来源 |
-| `POST /v1/series` | 建剧集并取业务编号 |
-| `GET /v1/series` | 按状态、标题过滤分页 |
+| `POST /v1/prompt-versions/{versionID}/retire` | 下架版本（受引用检查约束） |
+| `GET /v1/prompt-versions/{versionID}/references` | 查看在用引用统计 |
+| `POST /v1/series` | 新建剧集并取号 |
+| `GET /v1/series` | 过滤 / 排序 / 分页列表 |
 | `GET /v1/series/{seriesID}` | 剧集详情与分镜进度 |
 | `POST /v1/series/{seriesID}/shots` | 批量编排分镜（逐项结果） |
 | `POST /v1/series/{seriesID}/publish` | 发布剧集 |
@@ -99,20 +100,40 @@ go run ./cmd/server
 | `GET /v1/shots/{shotID}/render-jobs` | 渲染历史 |
 | `POST /v1/shots/{shotID}/review` | 审片通过或退回改稿 |
 | `GET /v1/render-quota` | 当日渲染配额 |
-| `POST /v1/workshops` | 开教学工坊 |
+| `POST /v1/workshops` | 开设教学工坊 |
 | `GET /v1/workshops` | 工坊列表 |
 | `POST /v1/workshops/{workshopID}/enrollments` | 学员报名 |
-| `POST /v1/workshops/{workshopID}/submissions` | 提交练习 |
-| `GET /v1/workshops/{workshopID}/submissions` | 练习分页列表 |
+| `POST /v1/workshops/{workshopID}/submissions` | 学员提交练习 |
+| `GET /v1/workshops/{workshopID}/submissions` | 练习列表 |
 | `POST /v1/workshops/{workshopID}/grading` | 停止报名进入评分 |
-| `POST /v1/workshops/{workshopID}/close` | 结课（需全部评审完成） |
+| `POST /v1/workshops/{workshopID}/close` | 结业（需全部评审完成） |
 | `POST /v1/practice-submissions/{submissionID}/review` | 评审练习 |
 
-错误统一为 `{"error":{"code","message","request_id","details"}}`，`code` 为稳定值：`invalid_argument`、
-`unauthenticated`、`permission_denied`、`not_found`、`conflict`、`failed_precondition`、`resource_exhausted`、
-`canceled`、`deadline_exceeded`、`internal`。请求 ID 由 `X-Request-Id` 透传或自动生成，并在响应头回显。
+错误统一返回：
 
-## 校验
+```json
+{"error": {"code": "failed_precondition", "message": "...", "request_id": "req_...", "details": {"field": "..."}}}
+```
+
+## 身份与权限
+
+- 登录返回一次性不透明 Bearer token，服务端只保存其 SHA-256 摘要；
+- 退出立即撤销会话并推进 `generation`；过期会话被拒绝并由后台巡检清理；
+- 口令使用 PBKDF2-HMAC-SHA256（24000 轮、随机盐、常数时间比较）；
+- 两个业务角色：`director`（提示词、剧集、渲染、审片、发布、开课、评审）与
+  `apprentice`（报名、提交练习、查看目录）；权限在 Service 层按 capability 统一校验。
+
+## 运行
+
+```bash
+cp .env.example .env
+make run          # 或 MANJU_DB_PATH=./data/manjuflow.sqlite go run ./cmd/server
+curl localhost:8080/readyz
+```
+
+未设置 `MANJU_DIRECTOR_PASSWORD` 时，首次启动会生成一次性口令并在日志中打印一次；仓库与镜像不含任何凭据。
+
+## 验证
 
 ```bash
 go build ./...
@@ -122,18 +143,12 @@ go test ./... -count=1
 go test -race ./... -count=1
 ```
 
-容器（两个目标架构分别构建、核对架构、启动并检查健康与就绪）：
+容器（双架构）：
 
 ```bash
-docker buildx build --platform linux/amd64 -t manjuflow-studio:amd64 --load .
-docker buildx build --platform linux/arm64 -t manjuflow-studio:arm64 --load .
+docker build --platform linux/amd64 -t manjuflow-studio:amd64 .
+docker build --platform linux/arm64 -t manjuflow-studio:arm64 .
 docker image inspect manjuflow-studio:amd64 --format '{{.Os}}/{{.Architecture}}'
-docker run -d -p 18080:8080 manjuflow-studio:amd64
-curl http://127.0.0.1:18080/healthz
-curl http://127.0.0.1:18080/readyz
+docker run -d -p 8080:8080 manjuflow-studio:amd64
+curl localhost:8080/healthz && curl localhost:8080/readyz
 ```
-
-## 时间与时区
-
-业务时区固定为 `Asia/Shanghai`：渲染日配额按业务日归集，工坊报名与提交按窗口边界判定。镜像内嵌 `time/tzdata`，
-不依赖系统 zoneinfo。

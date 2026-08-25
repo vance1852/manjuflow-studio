@@ -1,26 +1,14 @@
-# Build output
-/manjuflow-server
-/bin/
-/out/
-
-# Local runtime state
-/data/
+# Local runtime data and credentials
+data/
 *.sqlite
-*.sqlite-shm
-*.sqlite-wal
+*.sqlite-*
+.env
 
-# Local logs and scratch measurement output
+# Build and measurement artefacts
+/manjuflow-server
+manjuflow-server
 *.log
 measure.json
 
-# Local credentials and environment overrides
-.env
-.env.local
-
-# Authoring notes that must never reach the repository
+# Internal authoring notes that must not reach the model visible baseline
 SPEC_FREEZE.md
-
-# Editor and OS noise
-.idea/
-.vscode/
-.DS_Store
