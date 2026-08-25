@@ -1,0 +1,14 @@
+# Local runtime data and credentials
+data/
+*.sqlite
+*.sqlite-*
+.env
+
+# Build and measurement artefacts
+/manjuflow-server
+manjuflow-server
+*.log
+measure.json
+
+# Internal authoring notes that must not reach the model visible baseline
+SPEC_FREEZE.md
