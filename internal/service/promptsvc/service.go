@@ -205,14 +205,20 @@ func (s *Service) ActivateVersion(ctx context.Context, versionID int64) (prompt.
 
 // RetireVersion withdraws a version. Live references across storyboard shots,
 // unfinished render jobs and open teaching workshops all block the retirement,
-// because those flows still need the exact wording.
+// because those flows still need the exact wording. A blocked retirement is
+// recorded as a rejected audit event in its own transaction: the business
+// transaction that hit the rule is rolled back, so writing the trail into it
+// would discard the refusal together with the change it refused.
 func (s *Service) RetireVersion(ctx context.Context, versionID int64) (prompt.Version, error) {
 	principal, err := s.authorize(ctx, identity.CapManagePromptAssets)
 	if err != nil {
 		return prompt.Version{}, err
 	}
 	now := s.clock.Now()
-	var updated prompt.Version
+	var (
+		updated   prompt.Version
+		rejection audit.Event
+	)
 	err = s.runner.InTx(ctx, func(ctx context.Context, q repository.Querier) error {
 		version, template, err := s.loadVersion(ctx, q, versionID, principal.StudioID)
 		if err != nil {
@@ -223,13 +229,11 @@ func (s *Service) RetireVersion(ctx context.Context, versionID int64) (prompt.Ve
 			return err
 		}
 		if err := version.Retire(now, references.total()); err != nil {
-			blocked := auditlog.Rejected("prompt_version.retire_blocked", audit.ObjectPromptVersion, version.ID).
-				WithDetail("bound_shots", strconv.Itoa(references.Shots)).
-				WithDetail("unfinished_jobs", strconv.Itoa(references.Jobs)).
-				WithDetail("live_workshops", strconv.Itoa(references.Workshops))
-			if auditErr := s.audits.Record(ctx, q, blocked); auditErr != nil {
-				return auditErr
-			}
+			rejection = s.rejectionFor(principal,
+				auditlog.Rejected("prompt_version.retire_blocked", audit.ObjectPromptVersion, version.ID).
+					WithDetail("bound_shots", strconv.Itoa(references.Shots)).
+					WithDetail("unfinished_jobs", strconv.Itoa(references.Jobs)).
+					WithDetail("live_workshops", strconv.Itoa(references.Workshops)))
 			return err
 		}
 		if err := s.prompts.SaveVersionStatus(ctx, q, version); err != nil {
@@ -241,9 +245,20 @@ func (s *Service) RetireVersion(ctx context.Context, versionID int64) (prompt.Ve
 			WithDetail("version", strconv.Itoa(version.Version)))
 	})
 	if err != nil {
+		s.recordRejection(ctx, rejection)
 		return prompt.Version{}, err
 	}
 	return updated, nil
+}
+
+// rejectionFor stamps a refusal event with the calling principal so the trail
+// names who acted even when the attempt is persisted outside the request tx.
+func (s *Service) rejectionFor(principal identity.Principal, event audit.Event) audit.Event {
+	stamped := event.Clone()
+	stamped.StudioID = principal.StudioID
+	stamped.ActorID = principal.UserID
+	stamped.ActorRole = string(principal.Role)
+	return stamped
 }
 
 // recordRejection persists a refused attempt in its own transaction. The business
