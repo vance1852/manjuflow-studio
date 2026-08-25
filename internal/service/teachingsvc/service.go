@@ -143,6 +143,12 @@ func (s *Service) OpenWorkshop(ctx context.Context, input OpenWorkshopInput) (te
 // Enroll takes one seat for the calling apprentice. The seat counter is moved
 // with a conditional update, so a full workshop rejects the extra request even
 // when several apprentices arrive at the same moment.
+//
+// Reserving the seat and writing the enrolment share one transaction. A
+// duplicate request hits the per-apprentice unique constraint, which rolls the
+// reservation back together with the insert, so a refused enrolment can never
+// leave a seat consumed. This keeps the enrolled counter aligned with the real
+// enrolment rows and leaves the seat free for the next apprentice.
 func (s *Service) Enroll(ctx context.Context, workshopID int64) (teaching.Enrollment, error) {
 	principal, err := s.authorize(ctx, identity.CapEnrollWorkshop)
 	if err != nil {
@@ -153,8 +159,6 @@ func (s *Service) Enroll(ctx context.Context, workshopID int64) (teaching.Enroll
 		enrollment teaching.Enrollment
 		rejection  audit.Event
 	)
-	// Taking the seat in its own short transaction keeps the capacity check out of
-	// the enrolment write, so a slow write never holds the workshop row.
 	if err := s.runner.InTx(ctx, func(ctx context.Context, q repository.Querier) error {
 		workshop, err := s.loadWorkshop(ctx, q, workshopID, principal.StudioID)
 		if err != nil {
@@ -175,16 +179,10 @@ func (s *Service) Enroll(ctx context.Context, workshopID int64) (teaching.Enroll
 			return apperr.New(apperr.CodeExhausted, "workshop %d has no free seat", workshop.ID).
 				With("capacity", strconv.Itoa(workshop.Capacity))
 		}
-		return nil
-	}); err != nil {
-		s.recordRejection(ctx, rejection)
-		return teaching.Enrollment{}, err
-	}
-	err = s.runner.InTx(ctx, func(ctx context.Context, q repository.Querier) error {
-		workshop, err := s.loadWorkshop(ctx, q, workshopID, principal.StudioID)
-		if err != nil {
-			return err
-		}
+		// The conditional UPDATE above holds the workshop row for the rest of the
+		// transaction, so the enrolment write and the seat claim commit or roll
+		// back together. A duplicate request fails on the unique constraint here
+		// and undoes the reservation rather than leaking a seat.
 		candidate := teaching.Enrollment{
 			WorkshopID:   workshop.ID,
 			ApprenticeID: principal.UserID,
@@ -204,8 +202,7 @@ func (s *Service) Enroll(ctx context.Context, workshopID int64) (teaching.Enroll
 		enrollment = candidate
 		return s.audits.Record(ctx, q, auditlog.Success("workshop.enrolled", audit.ObjectEnrollment, id).
 			WithDetail("workshop_id", strconv.FormatInt(workshop.ID, 10)))
-	})
-	if err != nil {
+	}); err != nil {
 		s.recordRejection(ctx, rejection)
 		return teaching.Enrollment{}, err
 	}

@@ -146,6 +146,97 @@ func TestApprenticeEnrolsOnceAndPracticeNeedsASeat(t *testing.T) {
 	}
 }
 
+// TestDuplicateEnrolmentDoesNotLeakASeat reproduces a double-click enrolment:
+// the second attempt hits the per-apprentice unique constraint and must not
+// consume a seat, otherwise the workshop reports a phantom seat and refuses the
+// next real apprentice.
+func TestDuplicateEnrolmentDoesNotLeakASeat(t *testing.T) {
+	h := newHarness(t)
+	director := h.directorToken()
+	first := h.apprenticeToken()
+	board := publishedBoard(t, h, director, 1)
+
+	workshop := h.openWorkshop(director, board.ShotIDs[0], 2, 48*time.Hour)
+	if workshop.Status != http.StatusCreated {
+		t.Fatalf("cannot open workshop: %s", workshop.Body)
+	}
+	workshopID := workshop.int64Field("id")
+
+	h.mustCall(requestSpec{
+		method: http.MethodPost,
+		path:   "/v1/workshops/" + itoa(workshopID) + "/enrollments",
+		token:  first,
+	}, http.StatusCreated)
+
+	// The first apprentice double-clicks enrolment. The retry must be rejected
+	// as a conflict and must not consume a second seat.
+	duplicate := h.call(requestSpec{
+		method: http.MethodPost,
+		path:   "/v1/workshops/" + itoa(workshopID) + "/enrollments",
+		token:  first,
+	})
+	if duplicate.Status != http.StatusConflict {
+		t.Fatalf("duplicate enrolment returned %d, want 409: %s", duplicate.Status, duplicate.Body)
+	}
+
+	// A second, distinct apprentice must still be admitted because the workshop
+	// still has a real free seat.
+	h.mustCall(requestSpec{
+		method: http.MethodPost,
+		path:   "/v1/members",
+		token:  director,
+		payload: map[string]string{
+			"email":        "second-apprentice@manjuflow.test",
+			"display_name": "第二位学员",
+			"password":     "second-pass-2026",
+			"role":         "apprentice",
+		},
+	}, http.StatusCreated)
+	second := h.login("second-apprentice@manjuflow.test", "second-pass-2026")
+	h.mustCall(requestSpec{
+		method: http.MethodPost,
+		path:   "/v1/workshops/" + itoa(workshopID) + "/enrollments",
+		token:  second,
+	}, http.StatusCreated)
+
+	// The workshop is now genuinely full, so a third apprentice is refused.
+	h.mustCall(requestSpec{
+		method: http.MethodPost,
+		path:   "/v1/members",
+		token:  director,
+		payload: map[string]string{
+			"email":        "third-apprentice@manjuflow.test",
+			"display_name": "第三位学员",
+			"password":     "third-pass-2026",
+			"role":         "apprentice",
+		},
+	}, http.StatusCreated)
+	third := h.login("third-apprentice@manjuflow.test", "third-pass-2026")
+	full := h.call(requestSpec{
+		method: http.MethodPost,
+		path:   "/v1/workshops/" + itoa(workshopID) + "/enrollments",
+		token:  third,
+	})
+	if full.Status != http.StatusTooManyRequests {
+		t.Fatalf("third enrolment returned %d, want 429: %s", full.Status, full.Body)
+	}
+
+	// The enrolled counter must match the two real enrolment records, not the
+	// three attempts that touched the workshop.
+	listed := h.mustCall(requestSpec{
+		method: http.MethodGet,
+		path:   "/v1/workshops?state=open,teaching",
+		token:  director,
+	}, http.StatusOK)
+	items := listed.Decoded["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("listing returned %d workshops, want 1", len(items))
+	}
+	if int(items[0].(map[string]any)["enrolled"].(float64)) != 2 {
+		t.Fatalf("workshop reports %v seats taken, want 2", items[0].(map[string]any)["enrolled"])
+	}
+}
+
 func TestDirectorCannotSubmitPracticeAndApprenticeCannotGrade(t *testing.T) {
 	h := newHarness(t)
 	director := h.directorToken()
