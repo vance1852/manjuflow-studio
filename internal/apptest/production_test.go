@@ -236,6 +236,50 @@ func TestQuotaExhaustionRefusesFurtherRendersForTheDay(t *testing.T) {
 	}
 }
 
+func TestRejectedIdempotentSubmissionQueuesWhenQuotaRecoversSameKey(t *testing.T) {
+	h := newHarnessWith(t, func(cfg *config.Config) { cfg.DailyRenderCapacity = 1 })
+	token := h.directorToken()
+	board := h.seedStoryboard(token, 2)
+
+	// Burn the only slot of the day.
+	if reply := h.submitRender(token, board.ShotIDs[0], ""); reply.Status != http.StatusAccepted {
+		t.Fatalf("first submission returned %d: %s", reply.Status, reply.Body)
+	}
+	// The second shot, sent with an idempotency key, is refused because the day is full.
+	refused := h.submitRender(token, board.ShotIDs[1], "night-chase-take-02")
+	if refused.Status != http.StatusTooManyRequests {
+		t.Fatalf("quota-exhausted submission returned %d, want 429: %s", refused.Status, refused.Body)
+	}
+	if state := h.shotState(token, board, 2); state != "bound" {
+		t.Fatalf("refused shot moved to %q, want bound", state)
+	}
+
+	// The next business day resets the allowance.
+	h.clock.Advance(24 * time.Hour)
+	// The clock jump expires the 2-hour session, so log in again.
+	token = h.directorToken()
+
+	// Retrying with the same idempotency key must run the work, not replay the refusal.
+	retry := h.submitRender(token, board.ShotIDs[1], "night-chase-take-02")
+	if retry.Status != http.StatusAccepted {
+		t.Fatalf("retry after quota reset returned %d, want 202: %s", retry.Status, retry.Body)
+	}
+	if retry.Header.Get("Idempotent-Replay") == "true" {
+		t.Fatal("retry replayed the stored refusal instead of running the submission")
+	}
+	if retry.int64Field("job_id") == 0 {
+		t.Fatalf("retry produced no render job, got %s", retry.Body)
+	}
+	if state := h.shotState(token, board, 2); state != "rendering" {
+		t.Fatalf("retry left the shot at %q, want rendering", state)
+	}
+
+	quota := h.mustCall(requestSpec{method: http.MethodGet, path: "/v1/render-quota", token: token}, http.StatusOK)
+	if int(quota.Decoded["used"].(float64)) != 1 {
+		t.Fatalf("recovered day used %v slots, want 1", quota.Decoded["used"])
+	}
+}
+
 func TestPublishRequiresEveryShotApproved(t *testing.T) {
 	h := newHarness(t)
 	token := h.directorToken()

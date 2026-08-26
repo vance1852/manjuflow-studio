@@ -114,10 +114,25 @@ func (g *Guard) Begin(ctx context.Context, q repository.Querier, request Request
 }
 
 // Finish records the outcome of a guarded request so a later call with the same
-// key replays the stored response instead of running the work twice.
+// key replays the stored response instead of running the work twice. It is only
+// for requests that produced a durable side effect: a finished render job, a
+// stored prompt version and so on.
 func (g *Guard) Finish(ctx context.Context, q repository.Querier, claim Claim, status int, response string) error {
 	if !claim.Guarded || claim.Replayed || claim.RecordID == 0 {
 		return nil
 	}
 	return g.records.Complete(ctx, q, claim.RecordID, status, response, g.clock.Now())
+}
+
+// Fail releases the key of a request whose business work rolled back, so a later
+// call with the same key reopens it and runs the work again instead of replaying
+// the refusal. Call it when the guarded request was rejected before it produced
+// any durable side effect, for example because the daily render quota was
+// exhausted. A request that was actually accepted must still call Finish so the
+// same key keeps replaying the original response.
+func (g *Guard) Fail(ctx context.Context, q repository.Querier, claim Claim) error {
+	if !claim.Guarded || claim.Replayed || claim.RecordID == 0 {
+		return nil
+	}
+	return g.records.Fail(ctx, q, claim.RecordID, g.clock.Now())
 }

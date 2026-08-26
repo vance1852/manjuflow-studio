@@ -306,16 +306,15 @@ func (s *Service) SubmitRender(ctx context.Context, shotID int64, idempotencyKey
 
 	result, workErr := s.submitRenderWork(ctx, principal, shotID, claim)
 	if workErr != nil {
-		refused := SubmitRenderResult{ShotID: shotID, State: "rejected"}
-		encoded, encodeErr := json.Marshal(refused)
-		if encodeErr != nil {
-			return SubmitRenderResult{}, apperr.Wrap(encodeErr, apperr.CodeInternal, "cannot encode refused submission")
-		}
-		status := apperr.HTTPStatus(apperr.CodeOf(workErr))
-		if finishErr := s.runner.InTx(ctx, func(ctx context.Context, q repository.Querier) error {
-			return s.guard.Finish(ctx, q, claim, status, string(encoded))
-		}); finishErr != nil && !apperr.IsCode(finishErr, apperr.CodeNotFound) {
-			return SubmitRenderResult{}, finishErr
+		// The business transaction rolled back, so no durable side effect
+		// survives the refusal. Release the idempotency key instead of
+		// completing it: a later retry with the same key reopens the record
+		// and runs the work again, which lets a quota-exhausted submission
+		// queue once the allowance recovers.
+		if failErr := s.runner.InTx(ctx, func(ctx context.Context, q repository.Querier) error {
+			return s.guard.Fail(ctx, q, claim)
+		}); failErr != nil && !apperr.IsCode(failErr, apperr.CodeNotFound) {
+			return SubmitRenderResult{}, failErr
 		}
 		return SubmitRenderResult{}, workErr
 	}
