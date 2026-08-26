@@ -212,15 +212,6 @@ func AnyRendering(shots []Shot) bool {
 	return false
 }
 
-// RenderQueueDrained reports whether the storyboard has no render left in
-// flight, which drives the automatic move of the series into review.
-func RenderQueueDrained(shots []Shot) bool {
-	if len(shots) == 0 {
-		return false
-	}
-	return !AnyRendering(shots)
-}
-
 // AllRendered reports whether every shot finished rendering, which drives the
 // automatic move of the series into review.
 func AllRendered(shots []Shot) bool {

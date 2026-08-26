@@ -162,7 +162,7 @@ func (s *Service) Complete(ctx context.Context, assignment Assignment, owner, ar
 		if err != nil {
 			return err
 		}
-		if series.State == production.StateShooting && production.RenderQueueDrained(siblings) {
+		if series.State == production.StateShooting && production.AllRendered(siblings) {
 			if err := series.Transition(production.StateReviewing, now); err != nil {
 				return err
 			}

@@ -57,6 +57,56 @@ func TestSuccessfulRenderStoresTheArtifactAndMovesSeriesIntoReview(t *testing.T)
 	}
 }
 
+func TestRenderingOneShotOfManyDoesNotMoveSeriesIntoReview(t *testing.T) {
+	h := newHarness(t)
+	token := h.directorToken()
+	board := h.seedStoryboard(token, 3)
+
+	// Only the first shot is sent to render; the other two stay bound.
+	if reply := h.submitRender(token, board.ShotIDs[0], ""); reply.Status != http.StatusAccepted {
+		t.Fatalf("submission returned %d: %s", reply.Status, reply.Body)
+	}
+	if processed := h.processRenders(NewScriptedRenderer(Succeed("manju://night-market/shot-1")), 4); processed != 1 {
+		t.Fatalf("worker processed %d jobs, want 1", processed)
+	}
+	if state := h.shotState(token, board, 1); state != "rendered" {
+		t.Fatalf("shot 1 is %q, want rendered", state)
+	}
+	// The series must stay shooting while shots 2 and 3 have no artifact, so
+	// the director can still rebind and render the remaining storyboards.
+	if state := h.seriesState(token, board.SeriesID); state != "shooting" {
+		t.Fatalf("series is %q after one of three shots rendered, want shooting", state)
+	}
+
+	// Rebinding a prompt on a still-bound shot must keep working, which is the
+	// exact workflow the regression unblocked.
+	if reply := h.mustCall(requestSpec{
+		method:  http.MethodPost,
+		path:    "/v1/shots/" + itoa(board.ShotIDs[1]) + "/prompt",
+		token:   token,
+		payload: map[string]any{"prompt_version_id": board.VersionID},
+	}, http.StatusOK); reply.Status != http.StatusOK {
+		t.Fatalf("rebinding shot 2 returned %d: %s", reply.Status, reply.Body)
+	}
+
+	// Finishing the remaining shots then moves the series into review.
+	if reply := h.submitRender(token, board.ShotIDs[1], ""); reply.Status != http.StatusAccepted {
+		t.Fatalf("submission for shot 2 returned %d: %s", reply.Status, reply.Body)
+	}
+	if reply := h.submitRender(token, board.ShotIDs[2], ""); reply.Status != http.StatusAccepted {
+		t.Fatalf("submission for shot 3 returned %d: %s", reply.Status, reply.Body)
+	}
+	if processed := h.processRenders(NewScriptedRenderer(
+		Succeed("manju://night-market/shot-2"),
+		Succeed("manju://night-market/shot-3"),
+	), 6); processed != 2 {
+		t.Fatalf("worker processed %d jobs, want 2", processed)
+	}
+	if state := h.seriesState(token, board.SeriesID); state != "reviewing" {
+		t.Fatalf("series is %q once every shot rendered, want reviewing", state)
+	}
+}
+
 func TestFailedRenderBacksOffAndSucceedsOnTheSecondAttempt(t *testing.T) {
 	h := newHarness(t)
 	token := h.directorToken()
