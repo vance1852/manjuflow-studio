@@ -192,21 +192,6 @@ func (s *Service) ActivateVersion(ctx context.Context, versionID int64) (prompt.
 		if err := s.prompts.SaveVersionStatus(ctx, q, version); err != nil {
 			return err
 		}
-		siblings, _, err := s.prompts.ListVersions(ctx, q, template.ID, repository.Page{Limit: repository.MaxLimit})
-		if err != nil {
-			return err
-		}
-		for _, sibling := range siblings {
-			if sibling.ID == version.ID || sibling.Status != prompt.StatusActive {
-				continue
-			}
-			if err := sibling.RetireSuperseded(now); err != nil {
-				return err
-			}
-			if err := s.prompts.SaveVersionStatus(ctx, q, sibling); err != nil {
-				return err
-			}
-		}
 		updated = version
 		return s.audits.Record(ctx, q, auditlog.Success("prompt_version.activated", audit.ObjectPromptVersion, version.ID).
 			WithDetail("template_slug", template.Slug).

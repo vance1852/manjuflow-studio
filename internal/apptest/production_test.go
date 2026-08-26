@@ -113,6 +113,104 @@ func TestDraftPromptVersionCannotBeBoundToAShot(t *testing.T) {
 	}, http.StatusOK)
 }
 
+// versionStatus fetches the lifecycle state of one prompt version through the
+// listing endpoint so tests can assert it never moved without the caller asking.
+func versionStatus(t *testing.T, h *harness, token string, templateID, versionID int64) string {
+	t.Helper()
+	page := h.mustCall(requestSpec{
+		method: http.MethodGet,
+		path:   "/v1/prompt-templates/" + itoa(templateID) + "/versions",
+		token:  token,
+	}, http.StatusOK)
+	items, ok := page.Decoded["items"].([]any)
+	if !ok {
+		t.Fatalf("version listing has no items: %s", page.Body)
+	}
+	for _, item := range items {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if int64(entry["id"].(float64)) == versionID {
+			status, _ := entry["status"].(string)
+			return status
+		}
+	}
+	t.Fatalf("version %d is missing from the template listing", versionID)
+	return ""
+}
+
+func TestActivatingANewVersionLeavesABoundEarlierVersionUsable(t *testing.T) {
+	h := newHarness(t)
+	token := h.directorToken()
+	board := h.seedStoryboard(token, 1)
+
+	// The shot is bound to the first version and a render is queued but not run,
+	// mirroring the night-market chase board waiting in the render queue.
+	if reply := h.submitRender(token, board.ShotIDs[0], ""); reply.Status != http.StatusAccepted {
+		t.Fatalf("render submission returned %d: %s", reply.Status, reply.Body)
+	}
+
+	references := h.mustCall(requestSpec{
+		method: http.MethodGet,
+		path:   "/v1/prompt-versions/" + itoa(board.VersionID) + "/references",
+		token:  token,
+	}, http.StatusOK)
+	if int(references.Decoded["bound_shots"].(float64)) != 1 {
+		t.Fatalf("version backs %v bound shots, want 1", references.Decoded["bound_shots"])
+	}
+	if int(references.Decoded["unfinished_jobs"].(float64)) != 1 {
+		t.Fatalf("version backs %v unfinished jobs, want 1", references.Decoded["unfinished_jobs"])
+	}
+
+	// Append and activate the revised version while the first one is still in use.
+	second := h.mustCall(requestSpec{
+		method: http.MethodPost,
+		path:   "/v1/prompt-templates/" + itoa(board.TemplateID) + "/versions",
+		token:  token,
+		payload: map[string]any{
+			"body":     PromptBody("夜市追逐的女主角", "赛博水墨改稿", 4),
+			"notes":    "第二版",
+			"activate": true,
+		},
+	}, http.StatusCreated)
+	secondID := second.int64Field("id")
+
+	// Activating the revision must not touch the bound first version.
+	if status := versionStatus(t, h, token, board.TemplateID, board.VersionID); status != "active" {
+		t.Fatalf("bound first version was moved to %q by activating the second", status)
+	}
+	if status := versionStatus(t, h, token, board.TemplateID, secondID); status != "active" {
+		t.Fatalf("second version is %q, want active", status)
+	}
+
+	// Retirement of the in-use first version still goes through the reference
+	// gate and must be refused, exactly like an explicit retire call.
+	blocked := h.call(requestSpec{
+		method: http.MethodPost,
+		path:   "/v1/prompt-versions/" + itoa(board.VersionID) + "/retire",
+		token:  token,
+	})
+	if blocked.Status != http.StatusUnprocessableEntity {
+		t.Fatalf("retiring the in-use version returned %d, want a refusal: %s", blocked.Status, blocked.Body)
+	}
+
+	// The shot stays renderable on its original version without rebinding.
+	// The queued job is still in flight, so a fresh submission is refused by the
+	// in-flight guard rather than by a retired-version error. The refusal must
+	// not carry the prompt version status, which is how a retired version would
+	// surface.
+	resubmit := h.submitRender(token, board.ShotIDs[0], "")
+	if resubmit.Status != http.StatusUnprocessableEntity && resubmit.Status != http.StatusConflict {
+		t.Fatalf("resubmission returned %d, want an in-flight refusal: %s", resubmit.Status, resubmit.Body)
+	}
+	errEnvelope, _ := resubmit.Decoded["error"].(map[string]any)
+	detail, _ := errEnvelope["details"].(map[string]any)
+	if _, retired := detail["prompt_version_status"]; retired {
+		t.Fatalf("resubmission blamed the prompt version, the bound version must remain bindable: %s", resubmit.Body)
+	}
+}
+
 func TestPromptBodyMustDeclareTheRequiredDirectives(t *testing.T) {
 	h := newHarness(t)
 	token := h.directorToken()

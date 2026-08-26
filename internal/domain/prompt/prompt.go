@@ -170,19 +170,6 @@ func (v *Version) Retire(now time.Time, liveReferences int) error {
 	return nil
 }
 
-// RetireSuperseded withdraws a version that a newer activation replaced. The
-// studio keeps one version in use per template, so the previous one steps aside.
-func (v *Version) RetireSuperseded(now time.Time) error {
-	if v.Status != StatusActive {
-		return nil
-	}
-	v.Status = StatusRetired
-	retiredAt := now
-	v.RetiredAt = &retiredAt
-	v.Notes = strings.TrimSpace(v.Notes + " 已被新激活的版本替代")
-	return nil
-}
-
 // EnsureBindable rejects versions that must not enter production.
 func (v *Version) EnsureBindable() error {
 	switch v.Status {

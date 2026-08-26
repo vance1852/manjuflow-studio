@@ -97,6 +97,25 @@ func TestActivationRefusesRetiredVersionsAndRepeats(t *testing.T) {
 	}
 }
 
+func TestActivationLeavesOtherVersionsUntouched(t *testing.T) {
+	// Activating one version must never retire a sibling that is still bound to
+	// live work. Retirement only happens through Retire, which checks references.
+	first := &Version{Version: 1, Body: validBody(), Checksum: Checksum(validBody()), Status: StatusActive}
+	second := &Version{Version: 2, Body: validBody(), Checksum: Checksum(validBody()), Status: StatusDraft}
+	if err := second.Activate(stamp()); err != nil {
+		t.Fatalf("activation was refused: %v", err)
+	}
+	if first.Status != StatusActive {
+		t.Fatalf("activating version 2 retired version 1 to %s", first.Status)
+	}
+	if first.RetiredAt != nil {
+		t.Fatal("activating version 2 stamped a retirement time on version 1")
+	}
+	if first.Notes != "" {
+		t.Fatalf("activating version 2 rewrote version 1 notes to %q", first.Notes)
+	}
+}
+
 func TestRetirementIsBlockedByLiveReferences(t *testing.T) {
 	version := &Version{Version: 3, Status: StatusActive}
 	err := version.Retire(stamp(), 2)
