@@ -85,13 +85,6 @@ type SeriesFilter struct {
 	CreatedTo   *time.Time
 }
 
-// CountPredicate returns the filter used when counting matches. Counting only
-// needs the indexed state predicate, so the text and time range narrowing is
-// left to the page query.
-func (f SeriesFilter) CountPredicate() SeriesFilter {
-	return SeriesFilter{States: f.States}
-}
-
 // WorkshopFilter narrows a workshop listing.
 type WorkshopFilter struct {
 	States   []teaching.WorkshopState

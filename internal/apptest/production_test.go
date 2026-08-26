@@ -2,6 +2,7 @@ package apptest
 
 import (
 	"net/http"
+	"net/url"
 	"testing"
 	"time"
 
@@ -381,6 +382,91 @@ func TestListingSeriesAppliesFilterSortAndPaginationConsistently(t *testing.T) {
 	badLimit := h.call(requestSpec{method: http.MethodGet, path: "/v1/series?limit=5000", token: token})
 	if badLimit.Status != http.StatusBadRequest {
 		t.Fatalf("oversized limit returned %d", badLimit.Status)
+	}
+}
+
+func TestListingSeriesTitleFilterTotalMatchesActualResults(t *testing.T) {
+	h := newHarness(t)
+	token := h.directorToken()
+
+	titles := []string{
+		"夜市追逐 第一季",
+		"夜市追逐 第二季",
+		"黄昏列车",
+		"黄昏列车 续篇",
+		"深海回响",
+	}
+	for _, title := range titles {
+		h.mustCall(requestSpec{
+			method: http.MethodPost,
+			path:   "/v1/series",
+			token:  token,
+			payload: map[string]string{
+				"title":       title,
+				"code_prefix": "MJ",
+			},
+		}, http.StatusCreated)
+		h.clock.Advance(time.Minute)
+	}
+
+	// The unfiltered total covers the whole studio catalogue.
+	unfiltered := h.mustCall(requestSpec{
+		method: http.MethodGet,
+		path:   "/v1/series?limit=10",
+		token:  token,
+	}, http.StatusOK)
+	if int(unfiltered.Decoded["total"].(float64)) != len(titles) {
+		t.Fatalf("unfiltered total is %v, want %d", unfiltered.Decoded["total"], len(titles))
+	}
+
+	// A title keyword matches only the relevant series; the total must agree
+	// with the returned items so pagination never surfaces empty pages.
+	match := h.mustCall(requestSpec{
+		method: http.MethodGet,
+		path:   "/v1/series?title=" + url.QueryEscape("夜市追逐") + "&limit=2",
+		token:  token,
+	}, http.StatusOK)
+	matchItems := match.Decoded["items"].([]any)
+	wantMatches := 2
+	if int(match.Decoded["total"].(float64)) != wantMatches {
+		t.Fatalf("title filter total is %v, want %d", match.Decoded["total"], wantMatches)
+	}
+	if len(matchItems) != wantMatches {
+		t.Fatalf("title filter returned %d items, want %d", len(matchItems), wantMatches)
+	}
+
+	// Paging past the matched set must stay within the reported total and never
+	// produce a page that exceeds the match count.
+	overPage := h.mustCall(requestSpec{
+		method: http.MethodGet,
+		path:   "/v1/series?title=" + url.QueryEscape("夜市追逐") + "&limit=2&offset=2",
+		token:  token,
+	}, http.StatusOK)
+	if int(overPage.Decoded["total"].(float64)) != wantMatches {
+		t.Fatalf("paged title filter total is %v, want %d", overPage.Decoded["total"], wantMatches)
+	}
+	if len(overPage.Decoded["items"].([]any)) != 0 {
+		t.Fatalf("page past the matched set returned %d items, want 0", len(overPage.Decoded["items"].([]any)))
+	}
+
+	// A keyword matching nothing reports a zero total rather than the studio total.
+	miss := h.mustCall(requestSpec{
+		method: http.MethodGet,
+		path:   "/v1/series?title=" + url.QueryEscape("不存在的标题") + "&limit=10",
+		token:  token,
+	}, http.StatusOK)
+	if int(miss.Decoded["total"].(float64)) != 0 {
+		t.Fatalf("unmatched title total is %v, want 0", miss.Decoded["total"])
+	}
+
+	// Combining the title keyword with a state filter keeps both predicates.
+	stateMatch := h.mustCall(requestSpec{
+		method: http.MethodGet,
+		path:   "/v1/series?title=" + url.QueryEscape("黄昏列车") + "&state=draft&limit=10",
+		token:  token,
+	}, http.StatusOK)
+	if int(stateMatch.Decoded["total"].(float64)) != 2 {
+		t.Fatalf("title+state filter total is %v, want 2", stateMatch.Decoded["total"])
 	}
 }
 

@@ -103,9 +103,8 @@ func (SeriesStore) List(ctx context.Context, q repository.Querier, studioID int6
 		return nil, 0, err
 	}
 	clause, args := seriesPredicate(studioID, filter)
-	countClause, countArgs := seriesPredicate(studioID, filter.CountPredicate())
 
-	total, err := countRows(ctx, q, "cannot count series", `SELECT COUNT(*) FROM series`+countClause, countArgs...)
+	total, err := countRows(ctx, q, "cannot count series", `SELECT COUNT(*) FROM series`+clause, args...)
 	if err != nil {
 		return nil, 0, err
 	}
